@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>WebGL 3D Platformer</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #091220; color: #f8f3d4; }
+  body { font-family: system-ui, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #hud, #message { position: absolute; left: 16px; color: #f8f3d4; text-shadow: 0 0 12px rgba(0,0,0,.8); }
+  #hud { top: 16px; font-size: 16px; line-height: 1.4; }
+  #message { right: 16px; left: auto; top: 16px; font-size: 18px; text-align: right; }
+</style>
+</head>
+<body>
+<div id="hud"></div>
+<div id="message"></div>
+<canvas id="game"></canvas>
+<script>
+const TILE_SIZE = 1.0;
+const LEVEL_MAP = [
+"........................................................................................",
+"........................................................................................",
+"........................................................................................",
+".................................................o......................................",
+".................o......----.....................----###...........e...o................",
+"............................#...........................#.............................",
+".........#######.....####...#.......#######......####......#...........####..............",
+"....................#....#..#....................#....#.....###.........................",
+"..o....e.###......###....#..#..o.......o...........#....#............###...................",
+"..............##.........#..#..............###....#....#............................F......",
+"###########..##..#########..#############..##..###....###..###########..###########......",
+"#.........#.....#.............#...........#..#.......#.....#.........#..#.........#.....",
+"#..o......#..o..#..o......o..#..o......o..#..#..o....#..o..#..o......#..#..o......#.....",
+"#.......###.....###.......###.....###.....###.......###....###.......###....###.....#.....",
+"########################################################################################",
+"########################################################################################"
+];
+
+const canvas = document.getElementById('game');
+const hud = document.getElementById('hud');
+const message = document.getElementById('message');
+let gl;
+let program;
+let cubeMesh;
+let uMVP, uModel, uColor, uLight;
+let canvasWidth, canvasHeight;
+
+const COLORS = {
+  sky: [0.05, 0.08, 0.18],
+  ground: [0.16, 0.34, 0.30],
+  platform: [0.26, 0.36, 0.42],
+  player: [0.94, 0.89, 0.65],
+  hat: [0.22, 0.28, 0.43],
+  enemy: [0.83, 0.30, 0.30],
+  coin: [0.96, 0.79, 0.27],
+  flag: [0.27, 0.76, 0.54],
+  pole: [0.48, 0.42, 0.34],
+};
+
+const LEVEL_WIDTH = LEVEL_MAP[0].length;
+const LEVEL_HEIGHT = LEVEL_MAP.length;
+const level = LEVEL_MAP.map(row => row.split(''));
+const tileCollision = (c) => c === '#' || c === '-';
+const coinTile = 'o';
+const enemyTile = 'e';
+const flagTile = 'F';
+const playerStart = { x: 3.5, y: 4.2 };
+
+let lives = 3;
+let coins = 0;
+let time = 0;
+let won = false;
+let audioContext;
+
+const player = {
+  x: playerStart.x,
+  y: playerStart.y,
+  w: 0.6,
+  h: 0.9,
+  vx: 0,
+  vy: 0,
+  facing: 1,
+  onGround: false,
+  jumpTimer: 0,
+  coyoteTimer: 0,
+  jumpBuffer: 0,
+  alive: true,
+};
+
+const enemies = [];
+const keys = { left: false, right: false, jump: false };
+const camera = { x: 0, y: 3, z: 12, deadX: 5.5, deadY: 2.5 };
+
+function resize() {
+  canvasWidth = canvas.width = window.innerWidth;
+  canvasHeight = canvas.height = window.innerHeight;
+  gl.viewport(0, 0, canvasWidth, canvasHeight);
+}
+
+function initWebGL() {
+  gl = canvas.getContext('webgl');
+  if (!gl) { alert('WebGL not supported.'); return; }
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, `attribute vec3 aPosition; attribute vec3 aNormal; uniform mat4 uMVP; uniform mat4 uModel; uniform vec3 uLight; varying vec3 vNormal; void main(){ vNormal = normalize(mat3(uModel) * aNormal); gl_Position = uMVP * uModel * vec4(aPosition, 1.0); }`);
+  gl.compileShader(vs);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, `precision mediump float; uniform vec3 uColor; uniform vec3 uLight; varying vec3 vNormal; void main(){ float diff = max(dot(normalize(vNormal), normalize(uLight)), 0.2); gl_FragColor = vec4(uColor * (0.35 + diff * 0.65), 1.0); }`);
+  gl.compileShader(fs);
+  program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  gl.useProgram(program);
+  uMVP = gl.getUniformLocation(program, 'uMVP');
+  uModel = gl.getUniformLocation(program, 'uModel');
+  uColor = gl.getUniformLocation(program, 'uColor');
+  uLight = gl.getUniformLocation(program, 'uLight');
+  cubeMesh = createCubeMesh();
+}
+
+function createCubeMesh() {
+  const positions = [];
+  const normals = [];
+  function face(nx, ny, nz, verts) {
+    for (let i = 0; i < verts.length; i++) {
+      positions.push(...verts[i]);
+      normals.push(nx, ny, nz);
+    }
+  }
+  face(0, 0, 1, [[-0.5,-0.5,0.5],[0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,-0.5,0.5],[0.5,0.5,0.5],[-0.5,0.5,0.5]]);
+  face(0, 0, -1, [[0.5,-0.5,-0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[0.5,-0.5,-0.5],[-0.5,0.5,-0.5],[0.5,0.5,-0.5]]);
+  face(0, 1, 0, [[-0.5,0.5,0.5],[0.5,0.5,0.5],[0.5,0.5,-0.5],[-0.5,0.5,0.5],[0.5,0.5,-0.5],[-0.5,0.5,-0.5]]);
+  face(0, -1, 0, [[-0.5,-0.5,-0.5],[0.5,-0.5,-0.5],[0.5,-0.5,0.5],[-0.5,-0.5,-0.5],[0.5,-0.5,0.5],[-0.5,-0.5,0.5]]);
+  face(1, 0, 0, [[0.5,-0.5,0.5],[0.5,-0.5,-0.5],[0.5,0.5,-0.5],[0.5,-0.5,0.5],[0.5,0.5,-0.5],[0.5,0.5,0.5]]);
+  face(-1, 0, 0, [[-0.5,-0.5,-0.5],[-0.5,-0.5,0.5],[-0.5,0.5,0.5],[-0.5,-0.5,-0.5],[-0.5,0.5,0.5],[-0.5,0.5,-0.5]]);
+  const positionBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+  const normalBuffer = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+  const aPosition = gl.getAttribLocation(program, 'aPosition'); gl.enableVertexAttribArray(aPosition); gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer); gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 0, 0);
+  const aNormal = gl.getAttribLocation(program, 'aNormal'); gl.enableVertexAttribArray(aNormal); gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer); gl.vertexAttribPointer(aNormal, 3, gl.FLOAT, false, 0, 0);
+  return { count: positions.length / 3 };
+}
+
+function identity() { return new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]); }
+function multiply(a, b) { const o = new Float32Array(16); for (let i=0;i<4;i++){ for (let j=0;j<4;j++){ let sum=0; for (let k=0;k<4;k++){ sum += a[k*4+j] * b[i*4+k]; } o[i*4+j] = sum; } } return o; }
+function translate(tx, ty, tz){ const m=identity(); m[12]=tx; m[13]=ty; m[14]=tz; return m; }
+function scale(x,y,z){ const m=identity(); m[0]=x; m[5]=y; m[10]=z; return m; }
+function rotateY(a){ const c=Math.cos(a), s=Math.sin(a); return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]); }
+function rotateZ(a){ const c=Math.cos(a), s=Math.sin(a); return new Float32Array([c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]); }
+function perspective(fov, aspect, near, far){ const f=1/Math.tan(fov/2), nf=1/(near-far); const o=new Float32Array(16); o[0]=f/aspect; o[5]=f; o[10]=(far+near)*nf; o[11]=-1; o[14]=2*far*near*nf; o[15]=0; return o; }
+function normalize(v){ const l=Math.hypot(v[0],v[1],v[2]); return l?[v[0]/l,v[1]/l,v[2]/l]:[0,0,0]; }
+function subtract(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+function cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function lookAt(eye, center, up){ const f=normalize(subtract(center,eye)); const s=normalize(cross(f,up)); const u=cross(s,f); const o=identity(); o[0]=s[0]; o[4]=s[1]; o[8]=s[2]; o[1]=u[0]; o[5]=u[1]; o[9]=u[2]; o[2]=-f[0]; o[6]=-f[1]; o[10]=-f[2]; o[12]=-(s[0]*eye[0]+s[1]*eye[1]+s[2]*eye[2]); o[13]=-(u[0]*eye[0]+u[1]*eye[1]+u[2]*eye[2]); o[14]=f[0]*eye[0]+f[1]*eye[1]+f[2]*eye[2]; return o; }
+
+function setMatrixUniforms(mvp, model){ gl.uniformMatrix4fv(uMVP,false,mvp); gl.uniformMatrix4fv(uModel,false,model); }
+function drawMesh(model,color){ setMatrixUniforms(currentMVP,model); gl.uniform3fv(uColor,color); gl.drawArrays(gl.TRIANGLES,0,cubeMesh.count); }
+
+function tileAtPosition(px, py){ const tx=Math.floor(px); const ty=Math.floor(py); const row=LEVEL_HEIGHT-1-ty; if(tx<0||tx>=LEVEL_WIDTH||row<0) return '#'; if(row>=LEVEL_HEIGHT) return '.'; return level[row][tx]; }
+
+function getOverlappingTiles(rect){ const tiles=[]; const x0=Math.floor(rect.x); const x1=Math.floor(rect.x+rect.w-1e-6); const y0=Math.floor(rect.y); const y1=Math.floor(rect.y+rect.h-1e-6); for(let ty=y0;ty<=y1;ty++){ for(let tx=x0;tx<=x1;tx++){ const row=LEVEL_HEIGHT-1-ty; if(tx<0||tx>=LEVEL_WIDTH||row<0){ tiles.push({tx,ty,tile:'#'}); continue; } if(row>=LEVEL_HEIGHT) continue; const tile=level[row][tx]; if(tileCollision(tile)||tile==='-') tiles.push({tx,ty,tile}); } } return tiles; }
+
+function resolveX(entity, dx){ const rect={x:entity.x+dx,y:entity.y,w:entity.w,h:entity.h}; const tiles=getOverlappingTiles(rect); for(const {tx,tile} of tiles){ if(!tileCollision(tile)&&tile!=='-') continue; const tileLeft=tx; const tileRight=tx+1; const entityLeft=rect.x; const entityRight=rect.x+rect.w; if(entityRight>tileLeft&&entityLeft<tileRight){ if(dx>0) rect.x=tileLeft-rect.w; else if(dx<0) rect.x=tileRight; } } return rect.x-entity.x; }
+
+function resolveY(entity, dy){ let rect={x:entity.x,y:entity.y+dy,w:entity.w,h:entity.h}; const tiles=getOverlappingTiles(rect); let hitGround=false; for(const {ty,tile} of tiles){ if(!tileCollision(tile)&&tile!=='-') continue; const tileBottom=ty; const tileTop=ty+1; const entityBottom=rect.y; const entityTop=rect.y+rect.h; if(dy<0){ if(entityTop>tileBottom&&entityBottom<tileTop){ rect.y=tileTop; hitGround=true; } } else if(dy>0){ if(entityBottom<tileTop&&entityTop>tileBottom){ rect.y=tileBottom-rect.h; entity.vy=0; } } } return {dy:rect.y-entity.y,hitGround}; }
+
+function spawnActors(){ enemies.length=0; for(let row=0;row<LEVEL_HEIGHT;row++){ for(let col=0;col<LEVEL_WIDTH;col++){ if(level[row][col]===enemyTile){ const ty=LEVEL_HEIGHT-1-row; enemies.push({x:col+0.2,y:ty+0.1,w:0.6,h:0.75,vx:1.5,dir:1,alive:true}); level[row][col]='.'; } } } }
+
+function initAudio(){ const AudioContext=window.AudioContext||window.webkitAudioContext; audioContext=new AudioContext(); window.addEventListener('pointerdown',()=>{ if(audioContext.state==='suspended') audioContext.resume(); }); }
+function sampleSound(freq,duration=0.1,type='triangle',volume=0.12){ if(!audioContext) return; const now=audioContext.currentTime; const osc=audioContext.createOscillator(); const gain=audioContext.createGain(); osc.type=type; osc.frequency.setValueAtTime(freq,now); gain.gain.setValueAtTime(volume,now); gain.gain.exponentialRampToValueAtTime(0.001,now+duration); osc.connect(gain); gain.connect(audioContext.destination); osc.start(now); osc.stop(now+duration+0.02); }
+function playSound(name){ if(!audioContext) return; if(audioContext.state==='suspended') audioContext.resume(); if(name==='jump') sampleSound(320,0.1,'triangle'); if(name==='coin') sampleSound(620,0.12,'sine'); if(name==='stomp') sampleSound(180,0.08,'square'); if(name==='hurt') sampleSound(160,0.14,'sawtooth'); if(name==='win'){ sampleSound(420,0.14,'triangle'); sampleSound(520,0.16,'triangle'); } }
+
+window.addEventListener('keydown',(e)=>{ if(e.code==='ArrowLeft'||e.code==='KeyA'){ keys.left=true; e.preventDefault(); } if(e.code==='ArrowRight'||e.code==='KeyD'){ keys.right=true; e.preventDefault(); } if(e.code==='Space'){ keys.jump=true; player.jumpBuffer=0.12; e.preventDefault(); } if(e.code==='Enter'&&(won||!player.alive)) resetGame(); });
+window.addEventListener('keyup',(e)=>{ if(e.code==='ArrowLeft'||e.code==='KeyA') keys.left=false; if(e.code==='ArrowRight'||e.code==='KeyD') keys.right=false; if(e.code==='Space') keys.jump=false; });
+
+function update(dt){ if(won||!player.alive) return; time+=dt; player.coyoteTimer-=dt; player.jumpBuffer-=dt; const move=(keys.left?-1:0)+(keys.right?1:0); const groundAccel=48; const airAccel=22; const maxSpeed=5.2; const friction=player.onGround?0.82:0.95; const accel=player.onGround?groundAccel:airAccel; if(move!==0){ player.vx+=move*accel*dt; player.facing=move; } player.vx*=friction; if(Math.abs(player.vx)<0.05) player.vx=0; player.vx=Math.max(-maxSpeed,Math.min(maxSpeed,player.vx)); if(player.jumpBuffer>0&&(player.onGround||player.coyoteTimer>0)){ player.vy=9.8; player.onGround=false; player.coyoteTimer=0; player.jumpBuffer=0; player.jumpTimer=0.18; playSound('jump'); } if(player.jumpTimer>0&&keys.jump){ player.jumpTimer-=dt; } else if(!keys.jump&&player.vy>0){ player.vy*=0.45; player.jumpTimer=0; } const gravity=-40; const terminal=-24; player.vy=Math.max(terminal,player.vy+gravity*dt); const dx=resolveX(player,player.vx*dt); player.x+=dx; const {dy,hitGround}=resolveY(player,player.vy*dt); player.y+=dy; if(dy===0&&player.vy<0) player.vy=0; player.onGround=hitGround; if(player.onGround) player.coyoteTimer=0.1; collectCoins(); updateEnemies(dt); checkFlag(); clampPlayer(); updateCamera(dt); }
+function collectCoins(){ const rect={x:player.x,y:player.y,w:player.w,h:player.h}; for(let row=0;row<LEVEL_HEIGHT;row++){ for(let col=0;col<LEVEL_WIDTH;col++){ if(level[row][col]===coinTile){ const ty=LEVEL_HEIGHT-1-row; const coinRect={x:col+0.1,y:ty+0.1,w:0.8,h:0.8}; if(rectsOverlap(rect,coinRect)){ level[row][col]='.'; coins+=1; playSound('coin'); } } } } }
+function rectsOverlap(a,b){ return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y; }
+function updateEnemies(dt){ for(const enemy of enemies){ if(!enemy.alive) continue; enemy.vx=enemy.dir*1.6; const dx=resolveX(enemy,enemy.vx*dt); enemy.x+=dx; if(dx===0) enemy.dir*=-1; const aheadX=enemy.dir>0?enemy.x+enemy.w+0.1:enemy.x-0.1; const floorY=enemy.y-0.05; if(!tileCollision(tileAtPosition(aheadX,floorY))) enemy.dir*=-1; if(rectsOverlap(enemy,player)&&enemy.alive){ if(player.vy<0&&player.y>enemy.y+0.35){ enemy.alive=false; player.vy=7; playSound('stomp'); } else { hurtPlayer(); } } } }
+function hurtPlayer(){ if(!player.alive) return; lives-=1; playSound('hurt'); if(lives<=0){ player.alive=false; message.textContent='GAME OVER - Press Enter to restart'; } else { respawnPlayer(); } }
+function respawnPlayer(){ player.x=playerStart.x; player.y=playerStart.y; player.vx=0; player.vy=0; player.onGround=false; player.coyoteTimer=0; player.jumpBuffer=0; }
+function clampPlayer(){ const maxX=LEVEL_WIDTH-player.w; const maxY=LEVEL_HEIGHT-player.h; player.x=Math.max(0,Math.min(player.x,maxX)); player.y=Math.max(0,Math.min(player.y,maxY)); }
+function checkFlag(){ const flag=findFlag(); if(!flag) return; if(rectsOverlap(player,flag)){ won=true; playSound('win'); message.textContent='YOU WIN! Press Enter to restart'; } }
+function findFlag(){ for(let row=0;row<LEVEL_HEIGHT;row++){ for(let col=0;col<LEVEL_WIDTH;col++){ if(level[row][col]===flagTile){ const ty=LEVEL_HEIGHT-1-row; return {x:col+0.1,y:ty,w:0.8,h:1.9}; } } } return null; }
+function updateCamera(dt){ const targetX=player.x+player.w/2; const targetY=player.y+0.8; const left=camera.x+camera.deadX; const right=camera.x+(canvasWidth/TILE_SIZE)-camera.deadX; if(targetX<left) camera.x=targetX-camera.deadX; if(targetX>right) camera.x=targetX-(canvasWidth/TILE_SIZE)+camera.deadX; camera.x=Math.max(0,Math.min(camera.x,LEVEL_WIDTH-(canvasWidth/TILE_SIZE))); camera.y=Math.max(2,Math.min(targetY,LEVEL_HEIGHT-1)); }
+let currentMVP=identity();
+function render(){ gl.clearColor(COLORS.sky[0],COLORS.sky[1],COLORS.sky[2],1.0); gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT); gl.enable(gl.DEPTH_TEST); const proj=perspective(Math.PI/4,canvasWidth/canvasHeight,0.1,100); const eye=[camera.x+3.2,camera.y+2.2,12.0]; const center=[camera.x+3.2,camera.y+0.6,0.0]; const view=lookAt(eye,center,[0,1,0]); const viewProj=multiply(proj,view); currentMVP=viewProj; gl.uniform3fv(uLight, normalize([0.6,0.4,0.8])); drawScene(); hud.textContent=`Coins: ${coins}   Lives: ${lives}   Use Arrow/A/D + Space`; }
+function drawScene(){ for(let row=0;row<LEVEL_HEIGHT;row++){ for(let col=0;col<LEVEL_WIDTH;col++){ const tile=level[row][col]; const ty=LEVEL_HEIGHT-1-row; const x=col+0.5; const y=ty+0.5; if(tile==='#') drawCube(x,y,0,1,1,1,COLORS.ground); if(tile==='-') drawCube(x,y,0,1,0.24,1,COLORS.platform); if(tile===flagTile) drawFlag(col,ty); if(tile===coinTile) drawCoin(col,ty); } } for(const enemy of enemies) if(enemy.alive) drawEnemy(enemy); drawPlayer(); }
+function drawCube(x,y,z,sx,sy,sz,color){ const model=multiply(translate(x,y,z),scale(sx,sy,sz)); drawMesh(model,color); }
+function drawFlag(col,ty){ drawCube(col+0.8,ty+1.0,0,0.08,1.6,0.08,COLORS.pole); drawCube(col+0.8,ty+1.2,0.12,0.6,0.4,0.08,COLORS.flag); }
+function drawCoin(col,row){ const cx=col+0.5; const cy=row+0.5; const spin=time*4; const model=multiply(translate(cx,cy+0.15,0.2),multiply(rotateY(spin),scale(0.22,0.22,0.08))); drawMesh(model,COLORS.coin); }
+function drawEnemy(enemy){ drawCube(enemy.x+enemy.w/2,enemy.y+enemy.h/2,0.22,0.7,0.7,0.7,COLORS.enemy); const head=multiply(translate(enemy.x+enemy.w/2,enemy.y+enemy.h+0.15,0.22),scale(0.5,0.4,0.5)); drawMesh(head,COLORS.enemy); }
+function drawPlayer(){ const px=player.x+player.w/2; const py=player.y+player.h/2; const legAngle=player.onGround?Math.sin(time*14)*0.6:-0.8; drawCube(px,py+0.2,0.18,0.6,0.7,0.5,COLORS.player); drawCube(px,py+0.8,0.18,0.5,0.5,0.45,COLORS.player); drawCube(px,py+1.05,0.18,0.62,0.18,0.6,COLORS.hat); drawCube(px,py+0.9,0.33,0.53,0.08,0.18,COLORS.hat); drawCube(px-0.18,py-0.45,0.18,0.16,0.5,0.18,COLORS.player); drawCube(px+0.18,py-0.45,0.18,0.16,0.5,0.18,COLORS.player); drawCube(px-0.44,py+0.15,0.18,0.14,0.45,0.14,COLORS.player); drawCube(px+0.44,py+0.15,0.18,0.14,0.45,0.14,COLORS.player); }
+function resetGame(){ lives=3; coins=0; won=false; message.textContent=''; player.alive=true; player.x=playerStart.x; player.y=playerStart.y; player.vx=0; player.vy=0; player.onGround=false; player.coyoteTimer=0; player.jumpBuffer=0; for(let row=0;row<LEVEL_HEIGHT;row++){ for(let col=0;col<LEVEL_WIDTH;col++){ level[row][col]=LEVEL_MAP[row][col]; } } spawnActors(); }
+let last=performance.now();
+function loop(now){ const dt=Math.min(0.033,(now-last)/1000); last=now; update(dt); render(); requestAnimationFrame(loop); }
+
+initWebGL(); resize(); window.addEventListener('resize',resize); initAudio(); spawnActors(); resetGame(); requestAnimationFrame(loop);
+</script>
+</body>
+</html>
